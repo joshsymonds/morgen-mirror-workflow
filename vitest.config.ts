@@ -6,16 +6,13 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
-      // SDK-glue files can't be unit-tested locally — they depend on
-      // morgen()'s server-side runtime injection. Their behavior is
-      // observable only on Morgen's infrastructure post-deploy. The
-      // orchestrator and lib/ files cover the tested logic.
-      exclude: [
-        "src/deploy.ts",
-        "src/workflow.ts",
-        "src/lib/morgen-client-adapter.ts",
-        "src/**/*.types.ts",
-      ],
+      // The deployment artifact (workflow.ts) and CLI (deploy.ts)
+      // can't be unit-tested locally — they reference morgen() and
+      // luxon as V8-injected globals only present inside Morgen's
+      // server-side isolate. The pure logic is covered by the
+      // src/lib/* modules and their tests; workflow.ts hand-mirrors
+      // those for the V8 deployment path.
+      exclude: ["src/deploy.ts", "src/workflow.ts", "src/**/*.types.ts"],
       thresholds: {
         statements: 90,
         branches: 90,
