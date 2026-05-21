@@ -1,8 +1,15 @@
+import { DateTime } from "luxon";
 import { describe, expect, it } from "vitest";
 
 import { buildMarker } from "../../src/lib/marker";
 import type { CalendarRef, MorgenEvent, SourceEvent } from "../../src/lib/mirror";
-import { createMirror, deleteMirror, findMirror, updateMirror } from "../../src/lib/mirror";
+import {
+  createMirror,
+  deleteMirror,
+  findMirror,
+  SEARCH_WINDOW_HOURS,
+  updateMirror,
+} from "../../src/lib/mirror";
 import { FakeMorgenClient } from "../helpers/fake-morgen-client";
 
 const dest: CalendarRef = { accountId: "acct-work", calendarId: "cal-work" };
@@ -107,15 +114,19 @@ describe("findMirror", () => {
     expect(await findMirror(client, dest, groupId, aroundStart)).toBeNull();
   });
 
-  it("searches a window around the requested start (±1 day)", async () => {
+  it(`searches a window of exactly ±${SEARCH_WINDOW_HOURS}h around aroundStart`, async () => {
     const client = new FakeMorgenClient();
     await findMirror(client, dest, groupId, aroundStart);
     expect(client.listCalls).toHaveLength(1);
     const call = client.listCalls[0]!;
     expect(call.accountId).toBe(dest.accountId);
     expect(call.calendarIds).toBe(dest.calendarId);
-    expect(call.start < aroundStart).toBe(true);
-    expect(call.end > aroundStart).toBe(true);
+
+    const anchor = DateTime.fromISO(aroundStart, { zone: "Etc/UTC" });
+    const startDiff = DateTime.fromISO(call.start, { zone: "Etc/UTC" }).diff(anchor, "hours").hours;
+    const endDiff = DateTime.fromISO(call.end, { zone: "Etc/UTC" }).diff(anchor, "hours").hours;
+    expect(startDiff).toBeCloseTo(-SEARCH_WINDOW_HOURS, 6);
+    expect(endDiff).toBeCloseTo(SEARCH_WINDOW_HOURS, 6);
   });
 
   it("ignores events in different calendars", async () => {

@@ -27,6 +27,11 @@ const INITIAL_HASH = new Uint32Array([
 const BLOCK_BYTES = 64;
 const DIGEST_BYTES = 32;
 
+// One TextEncoder for the lifetime of the module. Allocating one per
+// sha256Bytes() call worked but produced unnecessary garbage when the
+// workflow processes a busy event batch.
+const TEXT_ENCODER = new TextEncoder();
+
 // noUncheckedIndexedAccess types every typed-array read as `number |
 // undefined` even though Uint32Array always returns a number for
 // in-bounds indices. Wrap the read once so call sites stay readable.
@@ -112,7 +117,7 @@ function compressBlock(state: Uint32Array, w: Uint32Array): void {
 }
 
 export function sha256Bytes(input: string): Uint8Array {
-  const padded = padMessage(new TextEncoder().encode(input));
+  const padded = padMessage(TEXT_ENCODER.encode(input));
   const state = new Uint32Array(INITIAL_HASH);
   for (let offset = 0; offset < padded.length; offset += BLOCK_BYTES) {
     compressBlock(state, expandSchedule(padded, offset));

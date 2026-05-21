@@ -250,3 +250,22 @@ describe("runOrchestrator — guards", () => {
     expect(client.createCalls).toHaveLength(0);
   });
 });
+
+describe("runOrchestrator — error contract", () => {
+  it("propagates errors from mirror operations (no per-event swallowing)", async () => {
+    // Pin the current behavior: if a destination call throws, the
+    // whole trigger fails. Morgen retries failed triggers
+    // end-to-end, so propagation gives clean retry semantics.
+    // A future change to per-event try/catch would silently swallow
+    // failures — this test catches that drift.
+    const client = new FakeMorgenClient();
+    client.createEvent = (): Promise<never> => Promise.reject(new Error("morgen api 503"));
+
+    await expect(
+      runOrchestrator(
+        client,
+        trigger({ eventUpdates: { added: [sourceEvent()], modified: [], removed: [] } }),
+      ),
+    ).rejects.toThrow("morgen api 503");
+  });
+});

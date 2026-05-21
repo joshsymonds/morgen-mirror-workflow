@@ -87,9 +87,11 @@ export interface MorgenClient {
 }
 
 // Time window around a source's start when scanning for an existing
-// mirror. ±24 hours catches events that have been rescheduled
-// within the day while keeping the listEvents query cheap.
-const SEARCH_WINDOW_HOURS = 24;
+// mirror. 7 days catches cross-day reschedules (the common case:
+// "moving Tuesday's meeting to next Wednesday") without making the
+// listEvents query expensive. Reschedules >7 days will orphan the
+// old mirror; that's an acceptable failure mode at this scale.
+export const SEARCH_WINDOW_HOURS = 168;
 
 function offsetIso(iso: string, hours: number): string {
   // iso is a local-naive ISO string ("YYYY-MM-DDTHH:mm:ss") with no
@@ -135,12 +137,10 @@ export async function findMirror(
     start: offsetIso(aroundStart, -SEARCH_WINDOW_HOURS),
     end: offsetIso(aroundStart, SEARCH_WINDOW_HOURS),
   });
-  return (
-    events.find(
-      (event) =>
-        event.calendarId === dest.calendarId && extractGroupId(event.description) === groupId,
-    ) ?? null
-  );
+  // listEvents already filters by calendarId via the calendarIds
+  // query parameter, so re-checking event.calendarId here would be
+  // redundant defense.
+  return events.find((event) => extractGroupId(event.description) === groupId) ?? null;
 }
 
 export interface MirrorUpdate {

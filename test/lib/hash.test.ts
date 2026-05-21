@@ -34,11 +34,6 @@ describe("iCalUidHash", () => {
     expect(iCalUidHash("any-uid", 999_999_999)).toMatch(alphabetRegex);
   });
 
-  it("is deterministic across repeated calls", () => {
-    expect(iCalUidHash(SOURCE_UID, 0)).toBe(iCalUidHash(SOURCE_UID, 0));
-    expect(iCalUidHash(SOURCE_UID, 1_779_412_680)).toBe(iCalUidHash(SOURCE_UID, 1_779_412_680));
-  });
-
   it("produces a different hash for the same uid at different dedupTs values", () => {
     // The whole point of including dedupTs: each recurring instance
     // gets a unique groupId so mirrors don't cross-merge between

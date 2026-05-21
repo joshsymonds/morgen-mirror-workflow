@@ -29,8 +29,10 @@ export interface WorkflowTrigger {
     modified: WorkflowEvent[];
     removed: WorkflowEvent[];
   };
+  // Optional to match the SDK's `accounts.calendar?` — the workflow
+  // is a no-op when calendars aren't configured anyway.
   accounts: {
-    calendar: CalendarRef[];
+    calendar?: CalendarRef[];
   };
 }
 
@@ -47,8 +49,25 @@ function destinationsFor(event: WorkflowEvent, cals: CalendarRef[]): CalendarRef
   return cals.filter((c) => c.calendarId !== event.calendarId);
 }
 
-function groupIdFor(event: WorkflowEvent & { uid: string }): string {
-  return iCalUidHash(event.uid, getDedupTs(event));
+interface Precheck {
+  withUid: WorkflowEvent & { uid: string };
+  groupId: string;
+  dests: CalendarRef[];
+}
+
+// Shared prelude for handleUpsert and handleRemoval. Returns null
+// for events the workflow must ignore (mirrors, uid-less events).
+// freeBusyStatus is NOT gated here — removal must clean up mirrors
+// of an event regardless of its current busy state.
+function precheck(event: WorkflowEvent, cals: CalendarRef[]): Precheck | null {
+  if (isMirror(event)) return null;
+  if (!event.uid) return null;
+  const withUid = event as WorkflowEvent & { uid: string };
+  return {
+    withUid,
+    groupId: iCalUidHash(withUid.uid, getDedupTs(event)),
+    dests: destinationsFor(event, cals),
+  };
 }
 
 async function deleteMirrorsAcross(
@@ -57,10 +76,12 @@ async function deleteMirrorsAcross(
   groupId: string,
   aroundStart: string,
 ): Promise<void> {
-  for (const dest of dests) {
-    const existing = await findMirror(client, dest, groupId, aroundStart);
-    if (existing) await deleteMirror(client, dest, existing);
-  }
+  await Promise.all(
+    dests.map(async (dest) => {
+      const existing = await findMirror(client, dest, groupId, aroundStart);
+      if (existing) await deleteMirror(client, dest, existing);
+    }),
+  );
 }
 
 async function upsertMirrorAt(
@@ -87,23 +108,19 @@ async function handleUpsert(
   cals: CalendarRef[],
   event: WorkflowEvent,
 ): Promise<void> {
-  if (isMirror(event)) return;
-  if (!event.uid) return;
   if (event.freeBusyStatus === "free") return;
-
-  const withUid = event as WorkflowEvent & { uid: string };
-  const groupId = groupIdFor(withUid);
-  const dests = destinationsFor(event, cals);
+  const pre = precheck(event, cals);
+  if (!pre) return;
 
   if (!shouldPropagate(event)) {
     // User declined / tentative: clean up any prior mirrors.
-    await deleteMirrorsAcross(client, dests, groupId, event.start);
+    await deleteMirrorsAcross(client, pre.dests, pre.groupId, event.start);
     return;
   }
 
-  for (const dest of dests) {
-    await upsertMirrorAt(client, dest, withUid, groupId);
-  }
+  await Promise.all(
+    pre.dests.map((dest) => upsertMirrorAt(client, dest, pre.withUid, pre.groupId)),
+  );
 }
 
 async function handleRemoval(
@@ -111,19 +128,16 @@ async function handleRemoval(
   cals: CalendarRef[],
   event: WorkflowEvent,
 ): Promise<void> {
-  if (isMirror(event)) return;
-  if (!event.uid) return;
-  const withUid = event as WorkflowEvent & { uid: string };
-  const groupId = groupIdFor(withUid);
-  const dests = destinationsFor(event, cals);
-  await deleteMirrorsAcross(client, dests, groupId, event.start);
+  const pre = precheck(event, cals);
+  if (!pre) return;
+  await deleteMirrorsAcross(client, pre.dests, pre.groupId, event.start);
 }
 
 export async function runOrchestrator(
   client: MorgenClient,
   trigger: WorkflowTrigger,
 ): Promise<void> {
-  const cals = trigger.accounts.calendar;
+  const cals = trigger.accounts.calendar ?? [];
   if (cals.length < 2) return;
 
   const { added, modified, removed } = trigger.eventUpdates;
