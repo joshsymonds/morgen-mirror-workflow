@@ -1,4 +1,4 @@
-/* eslint-disable max-lines-per-function, unicorn/prevent-abbreviations, unicorn/consistent-function-scoping, @typescript-eslint/naming-convention -- this file is the V8-isolate deployment artifact: a single self-contained run() function whose toString() must include every constant and helper it references. Moving anything to outer scope (consistent-function-scoping) or renaming `DateTime` (naming-convention) would break the SDK's serialization round-trip. The pure logic in src/lib/* remains strict; this file hand-mirrors it. */
+/* eslint-disable max-lines-per-function, unicorn/prevent-abbreviations, unicorn/consistent-function-scoping -- this file is the V8-isolate deployment artifact: a single self-contained run() function whose toString() must include every constant and helper it references. Moving anything to outer scope would break the SDK's serialization round-trip; the SHA-256 / base62 register names match the bundled crypto modules. The pure logic in src/lib/* remains strict; this file hand-mirrors it. */
 import type { DateTime as LuxonDateTime } from "luxon";
 import cw from "morgen-cw-sdk";
 
@@ -81,6 +81,7 @@ interface WorkflowTrigger {
 export const wf = cw.workflow(
   { name: "n-way-busy-mirror" },
   async function run(trigger: WorkflowTrigger): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/naming-convention -- preserves luxon's class name
     const { DateTime } = luxon;
 
     // ── Constants (mirror src/lib/*) ─────────────────────────
@@ -110,7 +111,7 @@ export const wf = cw.workflow(
     const HASH_LENGTH = 15;
     const MARKER_PREFIX = "Calendar Propagation:";
     const MARKER_REGEX = /Ref-Group-Id ([^#]+)#/;
-    const BLOCKING_STATUSES = new Set(["declined", "tentative"]);
+    const BLOCKING_STATUSES: ReadonlySet<string> = new Set(["declined", "tentative"]);
     const SEARCH_WINDOW_HOURS = 168;
 
     // ── SHA-256 (mirror src/lib/sha256.ts) ────────────────────
@@ -273,6 +274,7 @@ export const wf = cw.workflow(
       if (!participants) return true;
       const me = Object.values(participants).find((p) => p.accountOwner === true);
       if (!me) return true;
+      // Organizers don't RSVP — they always count as attending.
       if (me.roles?.owner === true) return true;
       const status = me.participationStatus;
       if (status === undefined) return true;
@@ -334,7 +336,7 @@ export const wf = cw.workflow(
     async function updateMirror(
       dest: CalendarRef,
       mirror: SdkEvent,
-      patch: { start: string; duration: string },
+      patch: { start: string; duration?: string | undefined },
     ): Promise<void> {
       if (!mirror.id) return;
       await morgen().events.updateEventV3({
@@ -404,9 +406,12 @@ export const wf = cw.workflow(
         return;
       }
       if (existing.start !== source.start || existing.duration !== source.duration) {
+        // Don't coerce a missing duration to a zero string — let
+        // compactRecord omit the field so the API sees absence (and
+        // can decide / reject) rather than a fabricated value.
         await updateMirror(dest, existing, {
           start: source.start,
-          duration: source.duration ?? "PT0M",
+          duration: source.duration,
         });
       }
     }

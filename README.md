@@ -109,8 +109,8 @@ src/
     rsvp.ts                      # accepted-only filter
     mirror.ts                    # MorgenClient interface + CRUD operations
     orchestrator.ts              # the propagation logic (testable)
-    morgen-client-adapter.ts     # SDK-glue: morgen()/fetchMorgen → MorgenClient
-  workflow.ts                    # cw.workflow(...) wiring
+    compact-record.ts            # strip-undefined helper used by workflow.ts
+  workflow.ts                    # self-contained V8-isolate artifact (hand-mirrors src/lib/*)
   deploy.ts                      # one-shot upload CLI
 test/
   lib/                           # mirror of src/lib/
