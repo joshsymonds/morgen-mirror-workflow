@@ -7,13 +7,20 @@
 // distinguishes "clear this field" (null) from "leave unchanged"
 // (absent).
 //
-// Only own enumerable string keys are iterated, so prototype-polluted
-// objects can't smuggle keys through.
+// Assignment uses Object.defineProperty rather than bracket notation
+// so an enumerable own `__proto__` key on the input doesn't trigger
+// Object.prototype's prototype setter and pollute the output's
+// prototype chain.
 export function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
   const out: Partial<T> = {};
   for (const [key, value] of Object.entries(record)) {
     if (value !== undefined) {
-      (out as Record<string, unknown>)[key] = value;
+      Object.defineProperty(out, key, {
+        value,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
   }
   return out;

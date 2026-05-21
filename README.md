@@ -109,7 +109,7 @@ src/
     rsvp.ts                      # accepted-only filter
     mirror.ts                    # MorgenClient interface + CRUD operations
     orchestrator.ts              # the propagation logic (testable)
-    compact-record.ts            # strip-undefined helper used by workflow.ts
+    compact-record.ts            # strip-undefined helper; lib parity copy for workflow.ts inline
   workflow.ts                    # self-contained V8-isolate artifact (hand-mirrors src/lib/*)
   deploy.ts                      # one-shot upload CLI
 test/

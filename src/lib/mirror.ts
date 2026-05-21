@@ -145,7 +145,10 @@ export async function findMirror(
 
 export interface MirrorUpdate {
   start: string;
-  duration: string;
+  // Optional so callers can leave the mirror's duration unchanged
+  // when the source's duration is itself absent — the underlying
+  // updateEvent call will omit the field rather than coerce a value.
+  duration?: string | undefined;
 }
 
 export async function updateMirror(

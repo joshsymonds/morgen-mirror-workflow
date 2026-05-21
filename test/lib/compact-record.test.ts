@@ -29,11 +29,21 @@ describe("compactRecord", () => {
     expect(compactRecord(input)).toEqual({ real: 1 });
   });
 
-  it("does not write to __proto__ when input has that key", () => {
-    // Object.entries iterates own enumerable string keys, which on a
-    // literal-created object cannot include __proto__ — but the
-    // contract is that the function only assigns keys it iterated.
-    const out = compactRecord({ safe: "value" });
+  it("rejects prototype-polluted inputs (no __proto__ pass-through)", () => {
+    // Construct an adversarial input where __proto__ is set as an own
+    // enumerable property via Object.defineProperty (not the literal
+    // syntax, which the parser intercepts). A refactor that swapped
+    // Object.entries for for...in over a non-null prototype would
+    // copy this key and pollute the output's prototype chain.
+    const malicious: Record<string, unknown> = { safe: "value" };
+    Object.defineProperty(malicious, "__proto__", {
+      value: { polluted: true },
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    const out = compactRecord(malicious);
     expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect((out as { polluted?: boolean }).polluted).toBeUndefined();
   });
 });

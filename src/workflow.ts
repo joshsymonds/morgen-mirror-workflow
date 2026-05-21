@@ -281,16 +281,29 @@ export const wf = cw.workflow(
       return !BLOCKING_STATUSES.has(status);
     }
 
+    // ── Compact (mirror src/lib/compact-record.ts) ───────────
+    function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
+      const out: Partial<T> = {};
+      for (const [key, value] of Object.entries(record)) {
+        if (value !== undefined) {
+          // Object.defineProperty bypasses Object.prototype's
+          // __proto__ setter, preventing prototype pollution from
+          // adversarial inputs.
+          Object.defineProperty(out, key, {
+            value,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+        }
+      }
+      return out;
+    }
+
     // ── Mirror CRUD over morgen() (mirror src/lib/mirror.ts) ──
     function offsetIso(iso: string, hours: number): string {
       const shifted = DateTime.fromISO(iso, { zone: "Etc/UTC" }).plus({ hours });
       return shifted.toISO({ suppressMilliseconds: true, includeOffset: false }) ?? iso;
-    }
-
-    function compactRecord(record: Record<string, unknown>): Record<string, unknown> {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(record)) if (v !== undefined) out[k] = v;
-      return out;
     }
 
     async function listEventsInWindow(dest: CalendarRef, aroundStart: string): Promise<SdkEvent[]> {

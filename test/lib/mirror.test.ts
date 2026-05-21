@@ -176,6 +176,31 @@ describe("updateMirror", () => {
     expect(call.duration).toBe("PT10M");
     expect(call.description).toBe(buildMarker("g1")); // unchanged
   });
+
+  it("forwards undefined duration verbatim (leaves the field for the API to omit)", async () => {
+    // Callers may legitimately omit duration when the source has none
+    // — updateMirror must not fabricate a fallback. The underlying
+    // updateEvent strips undefined fields at the wire boundary.
+    const client = new FakeMorgenClient();
+    const mirror: MorgenEvent = {
+      id: "evt-2",
+      uid: "uid-2@fake",
+      accountId: dest.accountId,
+      calendarId: dest.calendarId,
+      title: "[Busy]",
+      description: buildMarker("g2"),
+      start: "2026-05-22T01:18:00",
+      duration: "PT5M",
+      timeZone: "Etc/UTC",
+      showWithoutTime: false,
+    };
+    client.seed(mirror);
+
+    await updateMirror(client, dest, mirror, { start: "2026-05-22T03:00:00" });
+
+    expect(client.updateCalls).toHaveLength(1);
+    expect(client.updateCalls[0]!.duration).toBeUndefined();
+  });
 });
 
 describe("deleteMirror", () => {
