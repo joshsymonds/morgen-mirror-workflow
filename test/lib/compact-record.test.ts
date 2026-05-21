@@ -29,12 +29,14 @@ describe("compactRecord", () => {
     expect(compactRecord(input)).toEqual({ real: 1 });
   });
 
-  it("rejects prototype-polluted inputs (no __proto__ pass-through)", () => {
+  it("preserves the output's prototype chain even when input carries __proto__", () => {
     // Construct an adversarial input where __proto__ is set as an own
     // enumerable property via Object.defineProperty (not the literal
-    // syntax, which the parser intercepts). A refactor that swapped
-    // Object.entries for for...in over a non-null prototype would
-    // copy this key and pollute the output's prototype chain.
+    // syntax, which the parser intercepts). With bracket-assignment
+    // (`out[key] = value`) this key routes through Object.prototype's
+    // __proto__ setter and replaces the output's prototype chain.
+    // The current Object.defineProperty form defines an own data
+    // property and never triggers the setter.
     const malicious: Record<string, unknown> = { safe: "value" };
     Object.defineProperty(malicious, "__proto__", {
       value: { polluted: true },

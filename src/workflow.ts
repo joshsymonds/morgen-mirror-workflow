@@ -281,7 +281,7 @@ export const wf = cw.workflow(
       return !BLOCKING_STATUSES.has(status);
     }
 
-    // ── Compact (mirror src/lib/compact-record.ts) ───────────
+    // ── Compact (mirror src/lib/compact-record.ts) ────────────
     function compactRecord<T extends Record<string, unknown>>(record: T): Partial<T> {
       const out: Partial<T> = {};
       for (const [key, value] of Object.entries(record)) {

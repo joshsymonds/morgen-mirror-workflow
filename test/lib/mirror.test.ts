@@ -177,10 +177,13 @@ describe("updateMirror", () => {
     expect(call.description).toBe(buildMarker("g1")); // unchanged
   });
 
-  it("forwards undefined duration verbatim (leaves the field for the API to omit)", async () => {
-    // Callers may legitimately omit duration when the source has none
-    // — updateMirror must not fabricate a fallback. The underlying
-    // updateEvent strips undefined fields at the wire boundary.
+  it("forwards undefined duration verbatim (no fabricated fallback)", async () => {
+    // Callers may legitimately omit duration when the source has
+    // none. The lib's updateMirror forwards `undefined` verbatim to
+    // client.updateEvent; the deployment artifact in workflow.ts
+    // wraps the same call in compactRecord which then omits the
+    // field at the wire boundary. Either way: no fabricated
+    // fallback value is introduced.
     const client = new FakeMorgenClient();
     const mirror: MorgenEvent = {
       id: "evt-2",
