@@ -30,6 +30,8 @@ const DIGEST_BYTES = 32;
 // noUncheckedIndexedAccess types every typed-array read as `number |
 // undefined` even though Uint32Array always returns a number for
 // in-bounds indices. Wrap the read once so call sites stay readable.
+// The `?? 0` fallback is unreachable on valid inputs.
+/* v8 ignore next */
 const u32 = (arr: Uint32Array, i: number): number => arr[i] ?? 0;
 
 const rotr = (x: number, n: number): number => ((x >>> n) | (x << (32 - n))) >>> 0;

@@ -61,6 +61,13 @@ export default tseslint.config(
           allowDirectConstAssertionInArrowFunctions: true,
         },
       ],
+      // Allow `${something:number}` in template literals — universally
+      // representable, and the workflow code mixes uids with unix
+      // timestamps in hash inputs.
+      "@typescript-eslint/restrict-template-expressions": [
+        "error",
+        { allowNumber: true },
+      ],
 
       // ── Unused code ──────────────────────────────────────
       "@typescript-eslint/no-unused-vars": [
@@ -151,6 +158,12 @@ export default tseslint.config(
       "unicorn/prevent-abbreviations": [
         "error",
         {
+          // Domain terms that mirror Morgen's bundle / API field names
+          // verbatim — renaming would break the analogy to the
+          // upstream code we're interoperating with.
+          allowList: {
+            iCalUidHash: true,
+          },
           replacements: {
             args: false,
             config: false,

@@ -10,7 +10,9 @@ const LEAD_CHAR = ALPHABET.charAt(0);
 
 // noUncheckedIndexedAccess types a Uint8Array read as `number |
 // undefined`. For in-bounds indices the runtime always returns a
-// number; wrap the read to keep the bit-arithmetic readable.
+// number; wrap the read to keep the bit-arithmetic readable. The
+// `?? 0` fallback is unreachable on valid inputs.
+/* v8 ignore next */
 const u8 = (arr: Uint8Array, i: number): number => arr[i] ?? 0;
 
 export function base62Encode(bytes: Uint8Array): string {
@@ -44,17 +46,26 @@ export function base62Encode(bytes: Uint8Array): string {
       digits[i] = carry % BASE;
       carry = Math.floor(carry / BASE);
     }
+    // Defensive guard. The bytes-to-digits loop above is sized so
+    // outputLength * BASE >= 256^bytesLength + 1, so residual carry
+    // is impossible for any valid input. Kept in case of refactor.
+    /* v8 ignore next */
     if (carry !== 0) throw new Error("Non-zero carry");
     digitsUsed = count;
     inputIndex++;
   }
 
-  // Skip leading-zero digits introduced by the conversion (distinct
-  // from the leadingZeros we counted in the input).
+  // The conversion writes digits from the right; digitsUsed tracks
+  // exactly how many tail positions hold data, so no synthetic
+  // leading zeros are ever introduced. The skip-loop is defensive
+  // against refactor; its body is provably unreachable on valid
+  // input.
   let outIndex = outputLength - digitsUsed;
+  /* v8 ignore start */
   while (outIndex !== outputLength && u8(digits, outIndex) === 0) {
     outIndex++;
   }
+  /* v8 ignore stop */
 
   let result = LEAD_CHAR.repeat(leadingZeros);
   while (outIndex < outputLength) {
