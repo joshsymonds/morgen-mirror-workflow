@@ -2,11 +2,11 @@
   "name": "morgen-mirror-workflow",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "description": "N-way busy-time propagation across Morgen calendars",
   "license": "MIT",
   "scripts": {
-    "deploy": "tsx src/deploy.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "deploy": "npm run build && node dist/deploy.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

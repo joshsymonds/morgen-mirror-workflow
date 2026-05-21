@@ -1,4 +1,4 @@
-/* eslint-disable no-console -- deploy.ts is a CLI; user-facing output is via console */
+/* eslint-disable no-console, unicorn/no-process-exit, unicorn/prefer-top-level-await -- deploy.ts is a CLI. Console output is intentional. process.exit propagates the failure code to npm-run. Top-level await is unavailable under CommonJS, which we use here because morgen-cw-sdk's CJS default-export interop requires it. */
 import { wf } from "./workflow";
 
 // The workflow is fully self-contained — all helpers, constants, and
@@ -16,4 +16,7 @@ async function main(): Promise<void> {
   console.info("  3. Toggle the workflow active");
 }
 
-await main();
+void main().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});
