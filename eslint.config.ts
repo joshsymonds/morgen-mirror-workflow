@@ -169,6 +169,7 @@ export default tseslint.config(
             config: false,
             ctx: false,
             db: false,
+            dest: false, // shorter and clearer than "destination" for cal pairs
             env: false,
             err: false,
             fn: false,
