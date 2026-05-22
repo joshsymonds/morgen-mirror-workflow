@@ -2,7 +2,7 @@ import { getDedupTs } from "./dedup-ts";
 import { iCalUidHash } from "./hash";
 import { extractGroupId, isMirror } from "./marker";
 import type { CalendarRef, MorgenClient, MorgenEvent, SourceEvent } from "./mirror";
-import { createMirror, deleteMirror, updateMirror } from "./mirror";
+import { createMirror, deleteMirror, isDestination, isSource, updateMirror } from "./mirror";
 import { shouldPropagate } from "./rsvp";
 
 // The function reconciles, every run, the set of mirror events that
@@ -65,22 +65,38 @@ async function listForCalendar(
   });
 }
 
+// True for events whose presence should generate mirrors. The two
+// filters that disqualify a source (RSVP gate + freeBusyStatus=free)
+// stay co-located here so collectExpectedMirrors reads as policy, not
+// data wrangling.
+function isPropagatingSource(event: MorgenEvent): boolean {
+  if (isMirror(event)) return false;
+  if (event.freeBusyStatus === "free") return false;
+  if (!event.uid) return false;
+  return shouldPropagate(event);
+}
+
 function collectExpectedMirrors(
   sourceCal: CalendarRef,
   events: MorgenEvent[],
   cals: CalendarRef[],
 ): ExpectedMirror[] {
+  // Skip the whole calendar if it never acts as a source. The fetch
+  // pass still runs against it (orphan detection needs to see its
+  // existing mirrors), but no expected entries are emitted.
+  if (!isSource(sourceCal)) return [];
+  // Destinations are role-filtered once per source-cal rather than
+  // re-evaluated per event — they don't change inside the loop.
+  // Self-cal is also pre-pruned here.
+  const destinations = cals.filter(
+    (dest) => dest.calendarId !== sourceCal.calendarId && isDestination(dest),
+  );
   const out: ExpectedMirror[] = [];
   for (const event of events) {
-    if (isMirror(event)) continue;
-    if (event.freeBusyStatus === "free") continue;
-    if (!event.uid) continue;
-    if (!shouldPropagate(event)) continue;
+    if (!isPropagatingSource(event)) continue;
     const groupId = iCalUidHash(event.uid, getDedupTs(event));
-    for (const dest of cals) {
-      if (dest.calendarId !== sourceCal.calendarId) {
-        out.push({ dest, source: event, groupId });
-      }
+    for (const dest of destinations) {
+      out.push({ dest, source: event, groupId });
     }
   }
   return out;

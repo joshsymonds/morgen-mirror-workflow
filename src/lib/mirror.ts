@@ -4,9 +4,31 @@ import { buildMarker, extractGroupId } from "./marker";
 
 // A calendar identified by Morgen's (account, calendar) pair. The
 // workflow's `trigger.accounts.calendar[]` is an array of these.
+//
+// `role` configures asymmetric propagation:
+//   - "source": events here generate mirrors elsewhere, but mirrors are
+//     never written INTO this calendar. Used when the calendar has
+//     non-Josh viewers who shouldn't see [Busy] noise (the shared
+//     Justin-and-Josh calendar is the originating motivation).
+//   - "destination": this calendar receives mirrors but its own events
+//     are never propagated outward. Less commonly needed; supplied for
+//     symmetry.
+//   - "both" (default when role is absent): legacy N-way behavior.
+// Omitting the field is the back-compat alias for "both" so existing
+// call sites and tests need no churn.
+export type CalendarRole = "source" | "destination" | "both";
 export interface CalendarRef {
   accountId: string;
   calendarId: string;
+  role?: CalendarRole | undefined;
+}
+
+export function isSource(cal: CalendarRef): boolean {
+  return cal.role !== "destination";
+}
+
+export function isDestination(cal: CalendarRef): boolean {
+  return cal.role !== "source";
 }
 
 // What we need from a source event to construct a mirror payload.

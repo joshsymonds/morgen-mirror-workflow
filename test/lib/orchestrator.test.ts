@@ -225,3 +225,99 @@ describe("reconcileMirrors — propagation matrix", () => {
     expect(summary.created).toBe(6);
   });
 });
+
+describe("reconcileMirrors — per-calendar roles", () => {
+  // Roles let one calendar propagate OUT to others without receiving
+  // their mirrors. Motivating case: the Justin-and-Josh shared calendar
+  // — Josh's husband uses it to see joint plans and doesn't want every
+  // standup from Josh's work calendars showing up as [Busy].
+
+  it("source-only calendars propagate out but never receive mirrors", async () => {
+    const client = new FakeMorgenClient();
+    const sourceOnlyShared = { ...sharedCal, role: "source" as const };
+    const cals = [
+      { ...personalCal, role: "both" as const },
+      { ...workCal, role: "both" as const },
+      sourceOnlyShared,
+    ];
+    // A source on the shared cal should still propagate to the other two
+    client.seed(sourceIn(sourceOnlyShared));
+
+    const summary = await reconcileMirrors(client, cals, WINDOW);
+    expect(summary.created).toBe(2); // mirrors in personalCal + workCal
+    const destIds = new Set(client.createCalls.map((c) => c.calendarId));
+    expect(destIds).toEqual(new Set([personalCal.calendarId, workCal.calendarId]));
+  });
+
+  it("source-only calendars never receive mirrors from other sources", async () => {
+    const client = new FakeMorgenClient();
+    const sourceOnlyShared = { ...sharedCal, role: "source" as const };
+    const cals = [
+      { ...personalCal, role: "both" as const },
+      { ...workCal, role: "both" as const },
+      sourceOnlyShared,
+    ];
+    // Sources elsewhere should NOT create a mirror in the source-only shared cal
+    client.seed(sourceIn(personalCal));
+
+    const summary = await reconcileMirrors(client, cals, WINDOW);
+    expect(summary.created).toBe(1); // mirror in workCal only — shared is source-only
+    expect(client.createCalls[0]!.calendarId).toBe(workCal.calendarId);
+  });
+
+  it("deletes pre-existing mirrors in a calendar that is now source-only", async () => {
+    // Migration story: when you flip a calendar from `both` to `source`,
+    // the next reconcile tick should sweep out its existing mirrors as
+    // orphans (no longer "expected"). This is what cleans up the 521
+    // [Busy] entries already in Justin-and-Josh.
+    const client = new FakeMorgenClient();
+    const sourceOnlyShared = { ...sharedCal, role: "source" as const };
+    const cals = [
+      { ...personalCal, role: "both" as const },
+      { ...workCal, role: "both" as const },
+      sourceOnlyShared,
+    ];
+    // Source elsewhere with a mirror that USED to live on the shared cal
+    const source = sourceIn(personalCal);
+    const groupId = iCalUidHash(source.uid, 0);
+    client.seed(source);
+    client.seed(seededMirror(sharedCal, groupId)); // legacy mirror, no longer expected
+    client.seed(seededMirror(workCal, groupId)); // expected, should NOT be deleted
+
+    const summary = await reconcileMirrors(client, cals, WINDOW);
+    expect(summary.deleted).toBe(1);
+    expect(client.deleteCalls[0]!.calendarId).toBe(sharedCal.calendarId);
+    expect(summary.created).toBe(0); // workCal mirror already in place
+  });
+
+  it("treats absent role as 'both' for backward compatibility", async () => {
+    // Existing call sites (and the orchestrator's older tests above)
+    // pass plain CalendarRefs without a role; default semantics must
+    // match the legacy N-way behavior.
+    const client = new FakeMorgenClient();
+    client.seed(sourceIn(personalCal));
+
+    const summary = await reconcileMirrors(client, allCals, WINDOW);
+    expect(summary.created).toBe(2); // unchanged from the original suite
+  });
+
+  it("destination-only calendars receive mirrors but their events are not sources", async () => {
+    // Symmetric case: a calendar that only consumes (no propagation out).
+    // Less commonly needed than source-only, but the role model supports
+    // it cleanly. Sources on this calendar are ignored.
+    const client = new FakeMorgenClient();
+    const destOnly = { ...sharedCal, role: "destination" as const };
+    const cals = [
+      { ...personalCal, role: "both" as const },
+      { ...workCal, role: "both" as const },
+      destOnly,
+    ];
+    // Source on personalCal should still mirror INTO destOnly
+    client.seed(sourceIn(personalCal));
+    // Source on destOnly should be ignored — no mirror produced anywhere
+    client.seed(sourceIn(destOnly, { start: "2026-06-15T10:00:00" }));
+
+    const summary = await reconcileMirrors(client, cals, WINDOW);
+    expect(summary.created).toBe(2); // only personalCal's source propagates → workCal + destOnly
+  });
+});

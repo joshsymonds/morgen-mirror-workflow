@@ -61,9 +61,15 @@ interface MorgenApi {
   };
 }
 
+// Role mirrors src/lib/mirror.ts CalendarRole — see that file for the
+// model. Kept inline here because workflow.ts is the V8-isolate
+// deployment artifact and can't reach back into the bundle's modules.
+type CalendarRole = "source" | "destination" | "both";
+
 interface CalendarRef {
   accountId: string;
   calendarId: string;
+  role?: CalendarRole;
 }
 
 interface WorkflowTrigger {
@@ -452,19 +458,29 @@ export const wf = cw.workflow(
       return iCalUidHash(event.uid, getDedupTs(event));
     }
 
+    // Asymmetric propagation. See src/lib/mirror.ts isSource/isDestination
+    // for the model: a calendar with role "destination" never has its
+    // own events propagated out; one with role "source" never receives
+    // mirrors. "both" (or undefined) is the legacy N-way default. This
+    // workflow caps the inline calendar list in cals[] with explicit
+    // roles further down — see the `applyRoles` step in the entry block.
+    const isSource = (cal: CalendarRef): boolean => cal.role !== "destination";
+    const isDestination = (cal: CalendarRef): boolean => cal.role !== "source";
+
     function collectExpected(
       sourceCal: CalendarRef,
       events: SdkEvent[],
       allCals: CalendarRef[],
       out: Map<string, ExpectedMirror>,
     ): void {
+      if (!isSource(sourceCal)) return;
       for (const event of events) {
         const groupId = sourceGroupIdOrNull(event);
         if (groupId === null) continue;
         for (const dest of allCals) {
-          if (dest.calendarId !== sourceCal.calendarId) {
-            out.set(mirrorKey(dest.calendarId, groupId), { dest, source: event, groupId });
-          }
+          if (dest.calendarId === sourceCal.calendarId) continue;
+          if (!isDestination(dest)) continue;
+          out.set(mirrorKey(dest.calendarId, groupId), { dest, source: event, groupId });
         }
       }
     }
@@ -529,10 +545,27 @@ export const wf = cw.workflow(
     }
 
     // ── Entry ────────────────────────────────────────────────
-    const cals = trigger.accounts?.calendar ?? [];
+    // Per-calendar role overrides. Calendars not listed here default to
+    // "both" (legacy N-way). Keyed by Morgen's opaque calendarId — these
+    // strings are stable per (account, calendar) pair.
+    //
+    // Justin-and-Josh shared (Google): propagates OUT so my work calendars
+    // know I'm busy on joint plans, but receives no [Busy] noise — Justin
+    // uses this calendar too and the inbound mirrors clutter the shared
+    // view with my standups, 1:1s, etc.
+    const CALENDAR_ROLES: Record<string, CalendarRole> = {
+      // Justin and Josh
+      WyI2YTA0Yjc3OGM4OTcxZTlmMjU2ZDI2YTMiLCJ0M3M2YWdvdjNodWZpNmhzcTd0dnI2Y2g4c0Bncm91cC5jYWxlbmRhci5nb29nbGUuY29tIl0:
+        "source",
+    };
+
+    const cals: CalendarRef[] = (trigger.accounts?.calendar ?? []).map((cal) => ({
+      ...cal,
+      role: CALENDAR_ROLES[cal.calendarId] ?? "both",
+    }));
     log("n-way-busy-mirror entry", {
       calendarCount: cals.length,
-      calendarIds: cals.map((c) => c.calendarId),
+      calendars: cals.map((c) => ({ id: c.calendarId, role: c.role })),
     });
     if (cals.length < 2) {
       log("skip: <2 configured calendars (configure Accounts in the workflow's UI)");
