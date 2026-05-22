@@ -43,6 +43,20 @@ describe("createMirror", () => {
     expect(created.description).toBe(buildMarker(groupId));
   });
 
+  it("opts mirrors out of the destination calendar's default alerts", async () => {
+    // Without useDefaultAlerts: false, every mirror inherits the destination
+    // calendar's default reminder set (Google's 10/30-min defaults, etc.),
+    // and the phone/watch fire N+1 notifications for one source event.
+    // Probed against Morgen REST 2026-05-22: useDefaultAlerts: false
+    // round-trips through createEventV3 and persists alerts: {} on the
+    // backing Google/M365 event. JSCalendar names the field
+    // useDefaultAlertsOnCreation but Morgen's whitelist rejects the
+    // OnCreation suffix — the short form is the accepted name.
+    const client = new FakeMorgenClient();
+    await createMirror(client, dest, sourceEvent(), "g1");
+    expect(client.createCalls[0]!.useDefaultAlerts).toBe(false);
+  });
+
   it("copies showWithoutTime: true for all-day source events", async () => {
     const client = new FakeMorgenClient();
     const source = sourceEvent({

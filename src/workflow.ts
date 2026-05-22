@@ -380,6 +380,10 @@ export const wf = cw.workflow(
           showWithoutTime: source.showWithoutTime,
           freeBusyStatus: "busy",
           privacy: "private",
+          // See src/lib/mirror.ts CreateEventArgs for the rationale and the
+          // Morgen-whitelist gotcha (useDefaultAlertsOnCreation is rejected
+          // — only the short form survives the wire).
+          useDefaultAlerts: false,
         }),
       });
     }

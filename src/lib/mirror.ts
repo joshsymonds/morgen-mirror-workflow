@@ -80,6 +80,15 @@ export interface CreateEventArgs {
   showWithoutTime: boolean;
   freeBusyStatus?: string | undefined;
   privacy?: string | undefined;
+  // Setting false tells Morgen (and Google/M365 underneath) "this event
+  // has zero alarms, do not inherit the destination calendar's default
+  // reminder set." Without it, every mirror picks up that calendar's
+  // default reminders (Google's 10/30-min defaults, etc.) and the user's
+  // phone/watch fire N+1 notifications for one source meeting.
+  // JSCalendar names the field useDefaultAlertsOnCreation; Morgen's
+  // whitelist validator rejects the OnCreation suffix, so the short form
+  // is the only spelling that survives the wire.
+  useDefaultAlerts?: boolean | undefined;
 }
 
 export interface UpdateEventArgs {
@@ -89,6 +98,11 @@ export interface UpdateEventArgs {
   start?: string | undefined;
   duration?: string | undefined;
   description?: string | undefined;
+  // Same field, on the update path — used by the one-shot backfill that
+  // strips default reminders from mirrors created before this flag
+  // existed. Steady-state updates from the reconciler don't touch it
+  // (mirrors created post-fix already carry useDefaultAlerts: false).
+  useDefaultAlerts?: boolean | undefined;
 }
 
 export interface DeleteEventArgs {
@@ -140,6 +154,7 @@ export async function createMirror(
     showWithoutTime: source.showWithoutTime,
     freeBusyStatus: "busy",
     privacy: "private",
+    useDefaultAlerts: false,
   });
 }
 
