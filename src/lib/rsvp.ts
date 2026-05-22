@@ -2,19 +2,21 @@
 // carry more fields (email, name, locale, …); we narrow to what the
 // RSVP decision needs.
 export interface Participant {
-  accountOwner?: boolean;
-  calendarOwner?: boolean;
-  roles?: {
-    owner?: boolean;
-    attendee?: boolean;
-    chair?: boolean;
-    informational?: boolean;
-  };
-  participationStatus?: string;
+  accountOwner?: boolean | undefined;
+  calendarOwner?: boolean | undefined;
+  roles?:
+    | {
+        owner?: boolean | undefined;
+        attendee?: boolean | undefined;
+        chair?: boolean | undefined;
+        informational?: boolean | undefined;
+      }
+    | undefined;
+  participationStatus?: string | undefined;
 }
 
 export interface EventLike {
-  participants?: Record<string, Participant>;
+  participants?: Record<string, Participant> | undefined;
 }
 
 // Statuses that block propagation. Whitelist-style: anything else

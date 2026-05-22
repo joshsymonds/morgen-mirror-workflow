@@ -14,6 +14,7 @@ import cw from "morgen-cw-sdk";
 // injects luxon globally in the isolate.
 declare const morgen: () => MorgenApi;
 declare const luxon: { DateTime: typeof LuxonDateTime };
+declare const log: (...args: unknown[]) => void;
 
 interface SdkEvent {
   id?: string;
@@ -29,6 +30,10 @@ interface SdkEvent {
   freeBusyStatus?: string;
   privacy?: string;
   originalStartTime?: { date?: string; dateTime?: string; timeZone?: string };
+  // API-surface field for recurring-series instances. The bundle's
+  // originalStartTime is built from this; we use it as the dedupTs
+  // source for events read via listEvents.
+  recurrenceId?: string;
   participants?: Record<
     string,
     {
@@ -112,9 +117,37 @@ export const wf = cw.workflow(
     const MARKER_PREFIX = "Calendar Propagation:";
     const MARKER_REGEX = /Ref-Group-Id ([^#]+)#/;
     const BLOCKING_STATUSES: ReadonlySet<string> = new Set(["declined", "tentative"]);
-    const SEARCH_WINDOW_HOURS = 168;
 
     // ── SHA-256 (mirror src/lib/sha256.ts) ────────────────────
+    // Morgen's V8 isolate doesn't expose TextEncoder; encode UTF-8
+    // by hand to keep the workflow self-contained.
+    function utf8Encode(input: string): Uint8Array {
+      const bytes: number[] = [];
+      for (let i = 0; i < input.length; i++) {
+        const codePoint = input.codePointAt(i) ?? 0;
+        if (codePoint > 0xff_ff) i++;
+        if (codePoint < 0x80) {
+          bytes.push(codePoint);
+        } else if (codePoint < 0x8_00) {
+          bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+        } else if (codePoint < 0x1_00_00) {
+          bytes.push(
+            0xe0 | (codePoint >> 12),
+            0x80 | ((codePoint >> 6) & 0x3f),
+            0x80 | (codePoint & 0x3f),
+          );
+        } else {
+          bytes.push(
+            0xf0 | (codePoint >> 18),
+            0x80 | ((codePoint >> 12) & 0x3f),
+            0x80 | ((codePoint >> 6) & 0x3f),
+            0x80 | (codePoint & 0x3f),
+          );
+        }
+      }
+      return Uint8Array.from(bytes);
+    }
+
     const u32 = (arr: Uint32Array, i: number): number => arr[i] ?? 0;
     const rotr = (x: number, n: number): number => ((x >>> n) | (x << (32 - n))) >>> 0;
 
@@ -187,7 +220,7 @@ export const wf = cw.workflow(
     }
 
     function sha256Bytes(input: string): Uint8Array {
-      const padded = padMessage(new TextEncoder().encode(input));
+      const padded = padMessage(utf8Encode(input));
       const state = new Uint32Array(INITIAL_HASH);
       for (let offset = 0; offset < padded.length; offset += BLOCK_BYTES) {
         compressBlock(state, expandSchedule(padded, offset));
@@ -245,12 +278,27 @@ export const wf = cw.workflow(
     }
 
     // ── DedupTs (mirror src/lib/dedup-ts.ts) ──────────────────
+    // listEvents responses don't carry originalStartTime — they
+    // carry recurrenceId for recurring instances. Without using it
+    // here, every instance of a recurring series collapses to
+    // dedupTs=0 and the resulting groupId collisions cause mirror
+    // oscillation across instances.
     function getDedupTs(event: SdkEvent): number {
       const ost = event.originalStartTime;
-      if (!ost) return 0;
-      const isoInput = ost.date ?? ost.dateTime;
-      if (!isoInput) return 0;
-      return DateTime.fromISO(isoInput, { zone: ost.timeZone ?? "Etc/UTC" }).toUnixInteger();
+      if (ost) {
+        const isoInput = ost.date ?? ost.dateTime;
+        if (isoInput) {
+          return DateTime.fromISO(isoInput, {
+            zone: ost.timeZone ?? "Etc/UTC",
+          }).toUnixInteger();
+        }
+      }
+      if (event.recurrenceId) {
+        return DateTime.fromISO(event.recurrenceId, {
+          zone: event.timeZone ?? "Etc/UTC",
+        }).toUnixInteger();
+      }
+      return 0;
     }
 
     // ── Marker (mirror src/lib/marker.ts) ─────────────────────
@@ -301,28 +349,18 @@ export const wf = cw.workflow(
     }
 
     // ── Mirror CRUD over morgen() (mirror src/lib/mirror.ts) ──
-    function offsetIso(iso: string, hours: number): string {
-      const shifted = DateTime.fromISO(iso, { zone: "Etc/UTC" }).plus({ hours });
-      return shifted.toISO({ suppressMilliseconds: true, includeOffset: false }) ?? iso;
-    }
-
-    async function listEventsInWindow(dest: CalendarRef, aroundStart: string): Promise<SdkEvent[]> {
+    async function listEventsInCalendar(
+      cal: CalendarRef,
+      windowStartISO: string,
+      windowEndISO: string,
+    ): Promise<SdkEvent[]> {
       const response = await morgen().events.listEventsV3({
-        accountId: dest.accountId,
-        calendarIds: dest.calendarId,
-        start: offsetIso(aroundStart, -SEARCH_WINDOW_HOURS),
-        end: offsetIso(aroundStart, SEARCH_WINDOW_HOURS),
+        accountId: cal.accountId,
+        calendarIds: cal.calendarId,
+        start: windowStartISO,
+        end: windowEndISO,
       });
       return response.data?.events ?? [];
-    }
-
-    async function findMirror(
-      dest: CalendarRef,
-      groupId: string,
-      aroundStart: string,
-    ): Promise<SdkEvent | null> {
-      const events = await listEventsInWindow(dest, aroundStart);
-      return events.find((e) => extractGroupId(e.description) === groupId) ?? null;
     }
 
     async function createMirror(
@@ -375,89 +413,171 @@ export const wf = cw.workflow(
       });
     }
 
-    // ── Orchestration (mirror src/lib/orchestrator.ts) ────────
-    function destinationsFor(event: SdkEvent, cals: CalendarRef[]): CalendarRef[] {
-      return cals.filter((c) => c.calendarId !== event.calendarId);
+    // ── Reconcile (mirror src/lib/orchestrator.ts) ────────────
+    // Poll-and-reconcile: list events from every configured cal in a
+    // forward-looking window, compute the set of mirrors that SHOULD
+    // exist, compare to what does exist, and create / update / delete
+    // to converge. Trigger-agnostic — works for manual, HTTP, cron,
+    // or event-change triggers because we don't depend on
+    // trigger.eventUpdates (which Morgen only populates for
+    // Event-Change triggers anyway).
+    function mirrorKey(calendarId: string, groupId: string): string {
+      return `${calendarId}:${groupId}`;
     }
 
-    interface Precheck {
+    interface ExpectedMirror {
+      dest: CalendarRef;
+      source: SdkEvent;
       groupId: string;
-      dests: CalendarRef[];
+    }
+    interface ExistingMirror {
+      cal: CalendarRef;
+      mirror: SdkEvent;
+    }
+    interface PerCalFetch {
+      cal: CalendarRef;
+      events: SdkEvent[];
     }
 
-    function precheck(event: SdkEvent, cals: CalendarRef[]): Precheck | null {
+    function sourceGroupIdOrNull(event: SdkEvent): string | null {
       if (isMirror(event)) return null;
+      if (event.freeBusyStatus === "free") return null;
       if (!event.uid) return null;
-      return {
-        groupId: iCalUidHash(event.uid, getDedupTs(event)),
-        dests: destinationsFor(event, cals),
-      };
+      if (!event.start) return null;
+      if (!shouldPropagate(event)) return null;
+      return iCalUidHash(event.uid, getDedupTs(event));
     }
 
-    async function deleteMirrorsAcross(
-      dests: CalendarRef[],
-      groupId: string,
-      aroundStart: string,
-    ): Promise<void> {
-      await Promise.all(
-        dests.map(async (dest) => {
-          const existing = await findMirror(dest, groupId, aroundStart);
-          if (existing) await deleteMirror(dest, existing);
+    function collectExpected(
+      sourceCal: CalendarRef,
+      events: SdkEvent[],
+      allCals: CalendarRef[],
+      out: Map<string, ExpectedMirror>,
+    ): void {
+      for (const event of events) {
+        const groupId = sourceGroupIdOrNull(event);
+        if (groupId === null) continue;
+        for (const dest of allCals) {
+          if (dest.calendarId !== sourceCal.calendarId) {
+            out.set(mirrorKey(dest.calendarId, groupId), { dest, source: event, groupId });
+          }
+        }
+      }
+    }
+
+    function collectExisting(
+      cal: CalendarRef,
+      events: SdkEvent[],
+      out: Map<string, ExistingMirror>,
+    ): void {
+      for (const event of events) {
+        if (!isMirror(event)) continue;
+        const groupId = extractGroupId(event.description);
+        if (groupId !== null) {
+          out.set(mirrorKey(cal.calendarId, groupId), { cal, mirror: event });
+        }
+      }
+    }
+
+    interface ReconcilePlan {
+      toCreate: ExpectedMirror[];
+      toUpdate: { existing: ExistingMirror; expected: ExpectedMirror }[];
+      toDelete: ExistingMirror[];
+    }
+
+    function planReconciliation(
+      expected: Map<string, ExpectedMirror>,
+      existing: Map<string, ExistingMirror>,
+    ): ReconcilePlan {
+      const toCreate: ExpectedMirror[] = [];
+      const toUpdate: { existing: ExistingMirror; expected: ExpectedMirror }[] = [];
+      const toDelete: ExistingMirror[] = [];
+      for (const [key, exp] of expected) {
+        const got = existing.get(key);
+        if (!got) {
+          toCreate.push(exp);
+        } else if (
+          got.mirror.start !== exp.source.start ||
+          got.mirror.duration !== exp.source.duration
+        ) {
+          toUpdate.push({ existing: got, expected: exp });
+        }
+      }
+      for (const [key, got] of existing) {
+        if (!expected.has(key)) toDelete.push(got);
+      }
+      return { toCreate, toUpdate, toDelete };
+    }
+
+    async function applyPlan(plan: ReconcilePlan): Promise<void> {
+      await Promise.all([
+        ...plan.toCreate.map(async (exp) => {
+          await createMirror(exp.dest, exp.source, exp.groupId);
         }),
-      );
-    }
-
-    async function upsertMirrorAt(
-      dest: CalendarRef,
-      source: SdkEvent,
-      groupId: string,
-    ): Promise<void> {
-      if (!source.start) return;
-      const existing = await findMirror(dest, groupId, source.start);
-      if (!existing) {
-        await createMirror(dest, source, groupId);
-        return;
-      }
-      if (existing.start !== source.start || existing.duration !== source.duration) {
-        // Don't coerce a missing duration to a zero string — let
-        // compactRecord omit the field so the API sees absence (and
-        // can decide / reject) rather than a fabricated value.
-        await updateMirror(dest, existing, {
-          start: source.start,
-          duration: source.duration,
-        });
-      }
-    }
-
-    async function handleUpsert(cals: CalendarRef[], event: SdkEvent): Promise<void> {
-      if (event.freeBusyStatus === "free") return;
-      const pre = precheck(event, cals);
-      if (!pre || !event.start) return;
-      if (!shouldPropagate(event)) {
-        await deleteMirrorsAcross(pre.dests, pre.groupId, event.start);
-        return;
-      }
-      await Promise.all(pre.dests.map((dest) => upsertMirrorAt(dest, event, pre.groupId)));
-    }
-
-    async function handleRemoval(cals: CalendarRef[], event: SdkEvent): Promise<void> {
-      const pre = precheck(event, cals);
-      if (!pre || !event.start) return;
-      await deleteMirrorsAcross(pre.dests, pre.groupId, event.start);
+        ...plan.toUpdate.map(({ existing: got, expected: exp }) =>
+          updateMirror(got.cal, got.mirror, {
+            start: exp.source.start ?? got.mirror.start ?? "",
+            duration: exp.source.duration,
+          }),
+        ),
+        ...plan.toDelete.map((got) => deleteMirror(got.cal, got.mirror)),
+      ]);
     }
 
     // ── Entry ────────────────────────────────────────────────
     const cals = trigger.accounts?.calendar ?? [];
-    if (cals.length < 2) return;
-    const updates = trigger.eventUpdates ?? {};
-    const added = updates.added ?? [];
-    const modified = updates.modified ?? [];
-    const removed = updates.removed ?? [];
-    for (const event of [...added, ...modified]) {
-      await handleUpsert(cals, event);
+    log("n-way-busy-mirror entry", {
+      calendarCount: cals.length,
+      calendarIds: cals.map((c) => c.calendarId),
+    });
+    if (cals.length < 2) {
+      log("skip: <2 configured calendars (configure Accounts in the workflow's UI)");
+      return;
     }
-    for (const event of removed) {
-      await handleRemoval(cals, event);
+
+    const now = DateTime.now();
+    // luxon's toISO returns `string | null`, but null only for invalid
+    // DateTimes; DateTime.now() is always valid and remains so under
+    // .minus/.plus arithmetic. TS narrows the result to string in this
+    // file's tsconfig.
+    //
+    // Window: 7-day lookback (catches mirrors whose source was just
+    // deleted) + 90-day lookahead (most people schedule within 3
+    // months). Each cron run scans 4 calendars × ~97 days; even
+    // dense calendars stay under a few hundred events per cal.
+    const startISO = now
+      .minus({ days: 7 })
+      .toISO({ suppressMilliseconds: true, includeOffset: false });
+    const endISO = now
+      .plus({ days: 90 })
+      .toISO({ suppressMilliseconds: true, includeOffset: false });
+
+    log("reconcile window", { startISO, endISO });
+
+    const perCal: PerCalFetch[] = await Promise.all(
+      cals.map(async (cal) => ({ cal, events: await listEventsInCalendar(cal, startISO, endISO) })),
+    );
+
+    const expected = new Map<string, ExpectedMirror>();
+    const existing = new Map<string, ExistingMirror>();
+    for (const { cal, events } of perCal) {
+      collectExpected(cal, events, cals, expected);
+      collectExisting(cal, events, existing);
     }
+
+    const plan = planReconciliation(expected, existing);
+    log("reconcile plan", {
+      toCreate: plan.toCreate.length,
+      toUpdate: plan.toUpdate.length,
+      toDelete: plan.toDelete.length,
+    });
+
+    await applyPlan(plan);
+
+    log("n-way-busy-mirror done", {
+      created: plan.toCreate.length,
+      updated: plan.toUpdate.length,
+      deleted: plan.toDelete.length,
+    });
   },
 );

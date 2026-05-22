@@ -18,10 +18,26 @@ export interface SourceEvent {
   showWithoutTime: boolean;
 }
 
-// Subset of Morgen's event payload that we actually read / write.
-// The real event type has more fields (participants, alerts, …) but
-// the mirror logic doesn't care about them. Optional fields use
-// explicit `| undefined` for exactOptionalPropertyTypes ergonomics.
+// Participant entry on a Morgen event. We project only the fields
+// the RSVP filter actually reads.
+export interface MorgenParticipant {
+  accountOwner?: boolean | undefined;
+  calendarOwner?: boolean | undefined;
+  roles?: { owner?: boolean | undefined; attendee?: boolean | undefined } | undefined;
+  participationStatus?: string | undefined;
+}
+
+// JSCalendar-style original start time. Set on recurring instances
+// and exceptions; undefined on non-recurring events.
+export interface OriginalStartTime {
+  date?: string | undefined;
+  dateTime?: string | undefined;
+  timeZone?: string | undefined;
+}
+
+// Subset of Morgen's event payload that we read / write. Optional
+// fields use explicit `| undefined` for exactOptionalPropertyTypes
+// ergonomics.
 export interface MorgenEvent {
   id: string;
   uid: string;
@@ -35,6 +51,8 @@ export interface MorgenEvent {
   showWithoutTime: boolean;
   freeBusyStatus?: string | undefined;
   privacy?: string | undefined;
+  participants?: Record<string, MorgenParticipant> | undefined;
+  originalStartTime?: OriginalStartTime | undefined;
 }
 
 // Args mirror the morgen-cw-sdk shapes so the production adapter is

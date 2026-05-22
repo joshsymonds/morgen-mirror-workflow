@@ -1,42 +1,48 @@
 import { getDedupTs } from "./dedup-ts";
-import type { EventLike as DedupEventLike } from "./dedup-ts";
 import { iCalUidHash } from "./hash";
-import { isMirror } from "./marker";
-import type { CalendarRef, MorgenClient, SourceEvent } from "./mirror";
-import { createMirror, deleteMirror, findMirror, updateMirror } from "./mirror";
+import { extractGroupId, isMirror } from "./marker";
+import type { CalendarRef, MorgenClient, MorgenEvent, SourceEvent } from "./mirror";
+import { createMirror, deleteMirror, updateMirror } from "./mirror";
 import { shouldPropagate } from "./rsvp";
-import type { EventLike as RsvpEventLike } from "./rsvp";
 
-// The event shape we receive in trigger.eventUpdates. Wider than what
-// each helper needs — this is the projection of the Morgen API event
-// that our orchestrator threads through.
-export interface WorkflowEvent extends DedupEventLike, RsvpEventLike {
-  uid?: string | undefined;
-  accountId: string;
-  calendarId: string;
-  title?: string | undefined;
-  description?: string | undefined;
-  start: string;
-  duration: string;
-  timeZone: string;
-  showWithoutTime: boolean;
-  freeBusyStatus?: string | undefined;
+// The function reconciles, every run, the set of mirror events that
+// SHOULD exist across the configured calendars against what currently
+// exists. Idempotent on stable state; the only writes happen when a
+// mirror is missing, drifted (start/duration changed), or orphaned
+// (the source has been deleted or no longer propagates).
+//
+// Why poll-and-reconcile instead of delta-driven (`eventUpdates`)?
+// Morgen's `trigger.eventUpdates` populates only for Event-Change
+// triggers bound to a specific calendar; manual and HTTP triggers
+// always receive empty `eventUpdates`. With four source calendars
+// and a single HTTP-cron trigger driving propagation, deltas are
+// unavailable. Polling is also closer to how Morgen's own built-in
+// Calendar Propagation works (daily run, no event-update plumbing).
+
+export interface ReconcileOptions {
+  // Time window for both source-side discovery and mirror-side
+  // orphan detection. Lookback catches mirrors whose source was
+  // deleted recently; lookahead catches new events scheduled forward.
+  windowStartISO: string;
+  windowEndISO: string;
 }
 
-export interface WorkflowTrigger {
-  eventUpdates: {
-    added: WorkflowEvent[];
-    modified: WorkflowEvent[];
-    removed: WorkflowEvent[];
-  };
-  // Optional to match the SDK's `accounts.calendar?` — the workflow
-  // is a no-op when calendars aren't configured anyway.
-  accounts: {
-    calendar?: CalendarRef[];
-  };
+interface ExpectedMirror {
+  dest: CalendarRef;
+  source: MorgenEvent;
+  groupId: string;
 }
 
-function projectSource(event: WorkflowEvent): SourceEvent {
+interface ExistingMirror {
+  cal: CalendarRef;
+  mirror: MorgenEvent;
+}
+
+function mirrorKey(calendarId: string, groupId: string): string {
+  return `${calendarId}:${groupId}`;
+}
+
+function projectSource(event: MorgenEvent): SourceEvent {
   return {
     start: event.start,
     duration: event.duration,
@@ -45,106 +51,162 @@ function projectSource(event: WorkflowEvent): SourceEvent {
   };
 }
 
-function destinationsFor(event: WorkflowEvent, cals: CalendarRef[]): CalendarRef[] {
-  return cals.filter((c) => c.calendarId !== event.calendarId);
-}
-
-interface Precheck {
-  withUid: WorkflowEvent & { uid: string };
-  groupId: string;
-  dests: CalendarRef[];
-}
-
-// Shared prelude for handleUpsert and handleRemoval. Returns null
-// for events the workflow must ignore (mirrors, uid-less events).
-// freeBusyStatus is NOT gated here — removal must clean up mirrors
-// of an event regardless of its current busy state.
-function precheck(event: WorkflowEvent, cals: CalendarRef[]): Precheck | null {
-  if (isMirror(event)) return null;
-  if (!event.uid) return null;
-  const withUid = event as WorkflowEvent & { uid: string };
-  return {
-    withUid,
-    groupId: iCalUidHash(withUid.uid, getDedupTs(event)),
-    dests: destinationsFor(event, cals),
-  };
-}
-
-async function deleteMirrorsAcross(
+async function listForCalendar(
   client: MorgenClient,
-  dests: CalendarRef[],
-  groupId: string,
-  aroundStart: string,
-): Promise<void> {
-  await Promise.all(
-    dests.map(async (dest) => {
-      const existing = await findMirror(client, dest, groupId, aroundStart);
-      if (existing) await deleteMirror(client, dest, existing);
+  cal: CalendarRef,
+  windowStartISO: string,
+  windowEndISO: string,
+): Promise<MorgenEvent[]> {
+  return client.listEvents({
+    accountId: cal.accountId,
+    calendarIds: cal.calendarId,
+    start: windowStartISO,
+    end: windowEndISO,
+  });
+}
+
+function collectExpectedMirrors(
+  sourceCal: CalendarRef,
+  events: MorgenEvent[],
+  cals: CalendarRef[],
+): ExpectedMirror[] {
+  const out: ExpectedMirror[] = [];
+  for (const event of events) {
+    if (isMirror(event)) continue;
+    if (event.freeBusyStatus === "free") continue;
+    if (!event.uid) continue;
+    if (!shouldPropagate(event)) continue;
+    const groupId = iCalUidHash(event.uid, getDedupTs(event));
+    for (const dest of cals) {
+      if (dest.calendarId !== sourceCal.calendarId) {
+        out.push({ dest, source: event, groupId });
+      }
+    }
+  }
+  return out;
+}
+
+function collectExistingMirrors(cal: CalendarRef, events: MorgenEvent[]): ExistingMirror[] {
+  const out: ExistingMirror[] = [];
+  for (const event of events) {
+    if (!isMirror(event)) continue;
+    const groupId = extractGroupId(event.description);
+    if (groupId === null) continue;
+    out.push({ cal, mirror: event });
+  }
+  return out;
+}
+
+interface PerCalFetch {
+  cal: CalendarRef;
+  events: MorgenEvent[];
+}
+
+async function fetchAllCalendars(
+  client: MorgenClient,
+  cals: CalendarRef[],
+  options: ReconcileOptions,
+): Promise<PerCalFetch[]> {
+  return Promise.all(
+    cals.map(async (cal) => ({
+      cal,
+      events: await listForCalendar(client, cal, options.windowStartISO, options.windowEndISO),
+    })),
+  );
+}
+
+function buildExpectedMap(perCal: PerCalFetch[], cals: CalendarRef[]): Map<string, ExpectedMirror> {
+  const expected = new Map<string, ExpectedMirror>();
+  for (const { cal, events } of perCal) {
+    for (const candidate of collectExpectedMirrors(cal, events, cals)) {
+      expected.set(mirrorKey(candidate.dest.calendarId, candidate.groupId), candidate);
+    }
+  }
+  return expected;
+}
+
+function buildExistingMap(perCal: PerCalFetch[]): Map<string, ExistingMirror> {
+  const existing = new Map<string, ExistingMirror>();
+  for (const { cal, events } of perCal) {
+    for (const found of collectExistingMirrors(cal, events)) {
+      const groupId = extractGroupId(found.mirror.description);
+      if (groupId === null) continue;
+      existing.set(mirrorKey(cal.calendarId, groupId), found);
+    }
+  }
+  return existing;
+}
+
+interface ReconcilePlan {
+  toCreate: ExpectedMirror[];
+  toUpdate: { existing: ExistingMirror; expected: ExpectedMirror }[];
+  toDelete: ExistingMirror[];
+}
+
+function planReconciliation(
+  expected: Map<string, ExpectedMirror>,
+  existing: Map<string, ExistingMirror>,
+): ReconcilePlan {
+  const toCreate: ExpectedMirror[] = [];
+  const toUpdate: { existing: ExistingMirror; expected: ExpectedMirror }[] = [];
+  const toDelete: ExistingMirror[] = [];
+
+  for (const [key, exp] of expected) {
+    const got = existing.get(key);
+    if (!got) {
+      toCreate.push(exp);
+    } else if (
+      got.mirror.start !== exp.source.start ||
+      got.mirror.duration !== exp.source.duration
+    ) {
+      toUpdate.push({ existing: got, expected: exp });
+    }
+  }
+
+  for (const [key, got] of existing) {
+    if (!expected.has(key)) toDelete.push(got);
+  }
+
+  return { toCreate, toUpdate, toDelete };
+}
+
+async function applyPlan(client: MorgenClient, plan: ReconcilePlan): Promise<void> {
+  await Promise.all([
+    ...plan.toCreate.map(async (expected) => {
+      await createMirror(client, expected.dest, projectSource(expected.source), expected.groupId);
     }),
-  );
+    ...plan.toUpdate.map(({ existing, expected }) =>
+      updateMirror(client, existing.cal, existing.mirror, {
+        start: expected.source.start,
+        duration: expected.source.duration,
+      }),
+    ),
+    ...plan.toDelete.map((got) => deleteMirror(client, got.cal, got.mirror)),
+  ]);
 }
 
-async function upsertMirrorAt(
-  client: MorgenClient,
-  dest: CalendarRef,
-  source: WorkflowEvent & { uid: string },
-  groupId: string,
-): Promise<void> {
-  const existing = await findMirror(client, dest, groupId, source.start);
-  if (!existing) {
-    await createMirror(client, dest, projectSource(source), groupId);
-    return;
-  }
-  if (existing.start !== source.start || existing.duration !== source.duration) {
-    await updateMirror(client, dest, existing, {
-      start: source.start,
-      duration: source.duration,
-    });
-  }
+export interface ReconcileSummary {
+  created: number;
+  updated: number;
+  deleted: number;
 }
 
-async function handleUpsert(
+export async function reconcileMirrors(
   client: MorgenClient,
   cals: CalendarRef[],
-  event: WorkflowEvent,
-): Promise<void> {
-  if (event.freeBusyStatus === "free") return;
-  const pre = precheck(event, cals);
-  if (!pre) return;
+  options: ReconcileOptions,
+): Promise<ReconcileSummary> {
+  if (cals.length < 2) return { created: 0, updated: 0, deleted: 0 };
 
-  if (!shouldPropagate(event)) {
-    // User declined / tentative: clean up any prior mirrors.
-    await deleteMirrorsAcross(client, pre.dests, pre.groupId, event.start);
-    return;
-  }
+  const perCal = await fetchAllCalendars(client, cals, options);
+  const expected = buildExpectedMap(perCal, cals);
+  const existing = buildExistingMap(perCal);
+  const plan = planReconciliation(expected, existing);
+  await applyPlan(client, plan);
 
-  await Promise.all(
-    pre.dests.map((dest) => upsertMirrorAt(client, dest, pre.withUid, pre.groupId)),
-  );
-}
-
-async function handleRemoval(
-  client: MorgenClient,
-  cals: CalendarRef[],
-  event: WorkflowEvent,
-): Promise<void> {
-  const pre = precheck(event, cals);
-  if (!pre) return;
-  await deleteMirrorsAcross(client, pre.dests, pre.groupId, event.start);
-}
-
-export async function runOrchestrator(
-  client: MorgenClient,
-  trigger: WorkflowTrigger,
-): Promise<void> {
-  const cals = trigger.accounts.calendar ?? [];
-  if (cals.length < 2) return;
-
-  const { added, modified, removed } = trigger.eventUpdates;
-  for (const event of [...added, ...modified]) {
-    await handleUpsert(client, cals, event);
-  }
-  for (const event of removed) {
-    await handleRemoval(client, cals, event);
-  }
+  return {
+    created: plan.toCreate.length,
+    updated: plan.toUpdate.length,
+    deleted: plan.toDelete.length,
+  };
 }

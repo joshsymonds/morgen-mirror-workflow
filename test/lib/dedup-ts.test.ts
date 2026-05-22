@@ -68,6 +68,32 @@ describe("getDedupTs", () => {
     expect(getDedupTs(event)).toBe(1_779_412_680);
   });
 
+  it("derives dedupTs from recurrenceId when originalStartTime is absent (API path)", () => {
+    // Morgen's listEvents API doesn't surface originalStartTime; it
+    // surfaces recurrenceId on recurring-series instances. Without
+    // this fallback all instances of a series collapse to dedupTs=0.
+    const event: EventLike = {
+      recurrenceId: "2026-08-18T15:00:00",
+      timeZone: "America/Los_Angeles",
+    };
+    const expected = DateTime.fromISO("2026-08-18T15:00:00", {
+      zone: "America/Los_Angeles",
+    }).toUnixInteger();
+    expect(getDedupTs(event)).toBe(expected);
+  });
+
+  it("prefers originalStartTime over recurrenceId when both are present", () => {
+    // The bundle's internal originalStartTime takes precedence — if
+    // tests construct it, honor that exactly to keep bundle parity.
+    const event: EventLike = {
+      originalStartTime: { dateTime: "2026-08-18T15:00:00", timeZone: "Etc/UTC" },
+      recurrenceId: "2099-01-01T00:00:00",
+      timeZone: "Etc/UTC",
+    };
+    const fromOst = DateTime.fromISO("2026-08-18T15:00:00", { zone: "Etc/UTC" }).toUnixInteger();
+    expect(getDedupTs(event)).toBe(fromOst);
+  });
+
   it("handles a DST-boundary date correctly via luxon", () => {
     // 2026 US DST starts 2026-03-08 02:00 → 03:00 local. A wall-clock
     // moment at 2026-03-08T03:30 in America/Chicago is unambiguous.

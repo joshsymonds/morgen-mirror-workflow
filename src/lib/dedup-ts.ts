@@ -4,16 +4,19 @@ import { DateTime } from "luxon";
 // Set only on recurring-series instances and recurrence exceptions;
 // absent on non-recurring events.
 export interface OriginalStartTime {
-  date?: string;
-  dateTime?: string;
-  timeZone?: string;
+  date?: string | undefined;
+  dateTime?: string | undefined;
+  timeZone?: string | undefined;
 }
 
 // Minimal projection of a Morgen event for dedupTs computation.
 // Other modules narrow on richer types; this one only needs the
-// optional originalStartTime.
+// optional originalStartTime (a client-side bundle field) and
+// recurrenceId (the API-surface field for the same information).
 export interface EventLike {
-  originalStartTime?: OriginalStartTime;
+  originalStartTime?: OriginalStartTime | undefined;
+  recurrenceId?: string | undefined;
+  timeZone?: string | undefined;
 }
 
 // Mirrors EventObservable.getDeduplicationTs() in the bundled
@@ -21,18 +24,36 @@ export interface EventLike {
 // definition). Returns the unix-second value that feeds into the
 // natural iCalUIDHash fallback path.
 //
-// One intentional deviation from the bundle: if `originalStartTime`
-// is present but neither `date` nor `dateTime` is set, the bundle
-// would feed `undefined` to moment.tz() and yield NaN. We return 0
-// instead, treating it as if the field weren't there. Morgen's API
-// has never been observed emitting that shape in practice.
+// Two source fields, checked in order:
+// 1. `originalStartTime` — set on EventObservable instances inside
+//    the Morgen client app. Tests use this shape because it matches
+//    the bundle's internal model exactly.
+// 2. `recurrenceId` — the API-surface field that listEvents returns
+//    on recurring-series instances. The bundle's `originalStartTime`
+//    is built from this at sync time, so deriving from it ourselves
+//    reproduces the bundle's dedupTs for production events read via
+//    `listEvents`. Without this fallback, every recurring instance
+//    collapses to dedupTs=0 and all instances share a single
+//    groupId — causing perpetual mirror oscillation.
+//
+// Deviations from the bundle: if `originalStartTime` is present but
+// neither `date` nor `dateTime` is set, bundle yields NaN; we return
+// 0 (same handling applies to a missing `recurrenceId`).
 export function getDedupTs(event: EventLike): number {
   const { originalStartTime } = event;
-  if (!originalStartTime) return 0;
+  if (originalStartTime) {
+    const { date, dateTime, timeZone } = originalStartTime;
+    const isoInput = date ?? dateTime;
+    if (isoInput) {
+      return DateTime.fromISO(isoInput, { zone: timeZone ?? "Etc/UTC" }).toUnixInteger();
+    }
+  }
 
-  const { date, dateTime, timeZone } = originalStartTime;
-  const isoInput = date ?? dateTime;
-  if (!isoInput) return 0;
+  if (event.recurrenceId) {
+    return DateTime.fromISO(event.recurrenceId, {
+      zone: event.timeZone ?? "Etc/UTC",
+    }).toUnixInteger();
+  }
 
-  return DateTime.fromISO(isoInput, { zone: timeZone ?? "Etc/UTC" }).toUnixInteger();
+  return 0;
 }

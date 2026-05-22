@@ -27,10 +27,36 @@ const INITIAL_HASH = new Uint32Array([
 const BLOCK_BYTES = 64;
 const DIGEST_BYTES = 32;
 
-// One TextEncoder for the lifetime of the module. Allocating one per
-// sha256Bytes() call worked but produced unnecessary garbage when the
-// workflow processes a busy event batch.
-const TEXT_ENCODER = new TextEncoder();
+// Hand-rolled UTF-8 encoder. We can't use the platform's TextEncoder
+// because Morgen's V8 isolate doesn't expose it — the workflow path
+// would ReferenceError. Keeping the encoding identical here ensures
+// lib tests and the deployed workflow produce byte-identical digests.
+function utf8Encode(input: string): Uint8Array {
+  const bytes: number[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const codePoint = input.codePointAt(i) ?? 0;
+    if (codePoint > 0xff_ff) i++; // skip the low surrogate
+    if (codePoint < 0x80) {
+      bytes.push(codePoint);
+    } else if (codePoint < 0x8_00) {
+      bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+    } else if (codePoint < 0x1_00_00) {
+      bytes.push(
+        0xe0 | (codePoint >> 12),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    } else {
+      bytes.push(
+        0xf0 | (codePoint >> 18),
+        0x80 | ((codePoint >> 12) & 0x3f),
+        0x80 | ((codePoint >> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    }
+  }
+  return Uint8Array.from(bytes);
+}
 
 // noUncheckedIndexedAccess types every typed-array read as `number |
 // undefined` even though Uint32Array always returns a number for
@@ -117,7 +143,7 @@ function compressBlock(state: Uint32Array, w: Uint32Array): void {
 }
 
 export function sha256Bytes(input: string): Uint8Array {
-  const padded = padMessage(TEXT_ENCODER.encode(input));
+  const padded = padMessage(utf8Encode(input));
   const state = new Uint32Array(INITIAL_HASH);
   for (let offset = 0; offset < padded.length; offset += BLOCK_BYTES) {
     compressBlock(state, expandSchedule(padded, offset));
